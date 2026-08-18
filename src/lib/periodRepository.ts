@@ -1,5 +1,6 @@
 import { compareDateKeys } from '../utils/date'
 import type { PeriodEntry } from '../types/period'
+import { getStoredToken } from '../context/AuthContext'
 import {
   getApiBaseUrl as getConfiguredApiBaseUrl,
   isPersistenceConfigured,
@@ -36,11 +37,13 @@ function getPersistenceApiBaseUrl() {
 }
 
 async function apiRequest(path: string, init?: RequestInit) {
+  const token = getStoredToken()
+
   const response = await fetch(`${getPersistenceApiBaseUrl()}${path}`, {
     ...init,
-    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
   })

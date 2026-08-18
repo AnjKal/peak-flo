@@ -1,4 +1,3 @@
-import cookieParser from 'cookie-parser'
 import cors from 'cors'
 import express from 'express'
 import { randomUUID } from 'node:crypto'
@@ -48,9 +47,6 @@ const tableName = process.env.DYNAMODB_PERIOD_TABLE_NAME
 const corsOrigin =
   process.env.CORS_ORIGIN || 'http://localhost:5173'
 
-const isProduction =
-  process.env.NODE_ENV === 'production'
-
 
 // ============================================================
 // AWS CLIENTS
@@ -88,11 +84,11 @@ app.use(
   cors({
     origin: corsOrigin,
     credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
   }),
 )
 
 app.use(express.json())
-app.use(cookieParser())
 
 
 // ============================================================
@@ -101,53 +97,25 @@ app.use(cookieParser())
 
 const PROFILE_SORT_KEY = '__PROFILE__'
 
-const AUTH_COOKIE = 'peakflo_access_token'
-
-const COOKIE_MAX_AGE =
-  1000 * 60 * 60 * 24 * 7
-
-
-// ============================================================
-// COOKIE HELPERS
-// ============================================================
-
-function setAuthCookie(response, accessToken) {
-  response.cookie(AUTH_COOKIE, accessToken, {
-    httpOnly: true,
-
-    // For Vercel frontend + AWS API Gateway backend
-    sameSite: isProduction ? 'none' : 'lax',
-
-    secure: isProduction,
-
-    maxAge: COOKIE_MAX_AGE,
-
-    path: '/',
-  })
-}
-
-
-function clearAuthCookie(response) {
-  response.clearCookie(AUTH_COOKIE, {
-    httpOnly: true,
-
-    sameSite: isProduction ? 'none' : 'lax',
-
-    secure: isProduction,
-
-    path: '/',
-  })
-}
-
 
 // ============================================================
 // AUTHENTICATION
 // ============================================================
+// Auth now travels as a Bearer token in the Authorization header
+// instead of a cookie. This avoids cross-site cookie restrictions
+// since the frontend (Vercel) and API (API Gateway) live on
+// different domains.
 
 async function getCurrentUser(request) {
-  const token = request.cookies?.[AUTH_COOKIE]
+  const authHeader = request.headers?.authorization
 
-  if (!token || typeof token !== 'string') {
+  if (!authHeader || typeof authHeader !== 'string') {
+    return null
+  }
+
+  const [scheme, token] = authHeader.split(' ')
+
+  if (scheme !== 'Bearer' || !token) {
     return null
   }
 
@@ -617,20 +585,15 @@ app.post(
         return
       }
 
-      // NO SESSION MAP.
-      // The Cognito access token itself is stored
-      // in an HTTP-only cookie.
-      setAuthCookie(
-        response,
-        authResult.AccessToken,
-      )
-
+      // Token goes back in the JSON body. The frontend stores it
+      // and attaches it as "Authorization: Bearer <token>" on every
+      // subsequent request. No server-side session state is kept —
+      // the token itself, verified via Cognito's public keys, is
+      // the sole source of truth.
       response.json({
-        username:
-          username.trim(),
-
-        userId:
-          username.trim(),
+        username: username.trim(),
+        userId: username.trim(),
+        accessToken: authResult.AccessToken,
       })
     } catch (error) {
       response
@@ -677,12 +640,7 @@ app.post(
       await getCurrentUser(request)
 
     if (!user) {
-      clearAuthCookie(response)
-
-      response
-        .status(204)
-        .send()
-
+      response.status(204).send()
       return
     }
 
@@ -694,15 +652,11 @@ app.post(
         }),
       )
     } catch {
-      // Even if Cognito sign-out fails,
-      // remove the browser cookie.
+      // Even if Cognito sign-out fails, the frontend
+      // will drop the stored token anyway.
     }
 
-    clearAuthCookie(response)
-
-    response
-      .status(204)
-      .send()
+    response.status(204).send()
   },
 )
 

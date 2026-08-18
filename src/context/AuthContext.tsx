@@ -27,17 +27,48 @@ interface AuthUser {
   userId: string
 }
 
+interface SignInResponse extends AuthUser {
+  accessToken: string
+}
+
+const TOKEN_STORAGE_KEY = 'peakflo_access_token'
+
+// --------------------------------------------------------------
+// Token storage
+// --------------------------------------------------------------
+// The Cognito access token now travels as an Authorization: Bearer
+// header instead of a cookie, since the frontend (Vercel) and API
+// (API Gateway) are on different domains and cookies don't survive
+// that cross-site boundary reliably. localStorage persists it
+// across refreshes.
+
+export function getStoredToken(): string | null {
+  return localStorage.getItem(TOKEN_STORAGE_KEY)
+}
+
+function setStoredToken(token: string) {
+  localStorage.setItem(TOKEN_STORAGE_KEY, token)
+}
+
+function clearStoredToken() {
+  localStorage.removeItem(TOKEN_STORAGE_KEY)
+}
+
 async function readError(response: Response) {
   const message = await response.text()
   return message || 'Authentication request failed.'
 }
 
-async function authRequest(path: string, init?: RequestInit) {
+// Exported so other files (e.g. period-entries API calls) can reuse
+// the same authenticated-fetch behavior instead of duplicating it.
+export async function authRequest(path: string, init?: RequestInit) {
+  const token = getStoredToken()
+
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     ...init,
-    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
   })
@@ -80,6 +111,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return
       }
 
+      // No token stored yet — skip the request entirely rather than
+      // making a call that's guaranteed to 401.
+      if (!getStoredToken()) {
+        setUser(null)
+        setIsLoading(false)
+        return
+      }
+
       try {
         const currentUser = (await authRequest('/api/auth/me')) as AuthUser
         if (isActive) {
@@ -88,6 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         if (isActive) {
           setUser(null)
+          clearStoredToken()
         }
       } finally {
         if (isActive) {
@@ -104,12 +144,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const handleSignIn = async ({ username, password }: SignInCredentials) => {
-    const currentUser = (await authRequest('/api/auth/sign-in', {
+    const result = (await authRequest('/api/auth/sign-in', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
-    })) as AuthUser
+    })) as SignInResponse
 
-    setUser(currentUser)
+    setStoredToken(result.accessToken)
+    setUser({ username: result.username, userId: result.userId })
   }
 
   const handleSignUp = async ({ username, email, password }: SignUpDetails): Promise<SignUpResult> => {
@@ -131,10 +172,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const handleSignOut = async () => {
-    await authRequest('/api/auth/sign-out', {
-      method: 'POST',
-    })
-    setUser(null)
+    try {
+      await authRequest('/api/auth/sign-out', {
+        method: 'POST',
+      })
+    } finally {
+      clearStoredToken()
+      setUser(null)
+    }
   }
 
   const value: AuthContextValue = {
